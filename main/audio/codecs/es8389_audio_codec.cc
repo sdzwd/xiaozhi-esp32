@@ -1,6 +1,7 @@
 #include "es8389_audio_codec.h"
 
 #include <esp_log.h>
+#include <vector>
 
 static const char TAG[] = "Es8389AudioCodec";
 
@@ -9,7 +10,8 @@ Es8389AudioCodec::Es8389AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
     gpio_num_t pa_pin, uint8_t es8389_addr, bool use_mclk) {
     duplex_ = true; // 是否双工
     input_reference_ = false; // 是否使用参考输入，实现回声消除
-    input_channels_ = 1; // 输入通道数
+    input_channels_ = 2; // 输入通道数：双通道（立体声/双麦）
+    output_channels_ = 2; // 输出通道数：双声道（立体声）
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
     input_gain_ = 40;
@@ -150,7 +152,7 @@ void Es8389AudioCodec::EnableInput(bool enable) {
     if (enable) {
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
-            .channel = 1,
+            .channel = (uint8_t)input_channels_,
             .channel_mask = 0,
             .sample_rate = (uint32_t)input_sample_rate_,
             .mclk_multiple = 0,
@@ -170,10 +172,10 @@ void Es8389AudioCodec::EnableOutput(bool enable) {
     }
     if (enable) {
         if (!output_device_opened_) {
-            // Play 16bit 1 channel
+            // Play 16bit, channel count follows output_channels_ (stereo by default)
             esp_codec_dev_sample_info_t fs = {
                 .bits_per_sample = 16,
-                .channel = 1,
+                .channel = (uint8_t)output_channels_,
                 .channel_mask = 0,
                 .sample_rate = (uint32_t)output_sample_rate_,
                 .mclk_multiple = 0,
@@ -211,7 +213,20 @@ int Es8389AudioCodec::Read(int16_t* dest, int samples) {
 
 int Es8389AudioCodec::Write(const int16_t* data, int samples) {
     if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t)));
+        if (output_channels_ > 1) {
+            // xiaozhi 全链路产出单声道 PCM；双声道输出时复制到 L/R 两路，
+            // 否则样本数不匹配会导致 I2S 欠载/无声。
+            std::vector<int16_t> stereo(static_cast<size_t>(samples) * output_channels_);
+            for (int i = 0; i < samples; ++i) {
+                for (int c = 0; c < output_channels_; ++c) {
+                    stereo[static_cast<size_t>(i) * output_channels_ + c] = data[i];
+                }
+            }
+            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(
+                output_dev_, stereo.data(), stereo.size() * sizeof(int16_t)));
+        } else {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t)));
+        }
     }
     return samples;
 }
